@@ -17,7 +17,7 @@ HEADERS = {
 # Trading parameters
 INITIAL_CAPITAL = 10000  # $10,000 starting capital
 BUY_PERCENTAGE = 0.10  # Buy with 10% of available capital
-SELL_THRESHOLD = 3.0  # Sell when price reaches 200% appreciation (3x purchase price)
+SELL_THRESHOLD = 1.9  # Sell when price reaches 90% appreciation (1.9x purchase price)
 STOP_LOSS_THRESHOLD = 0.7  # Sell when price falls to 30% below purchase price (70% of purchase price)
 CHAIN_ID = "solana"  # Focus on Solana tokens
 FIRST_RUN = True  # Flag to skip buying on the first run
@@ -26,7 +26,7 @@ FIRST_RUN = True  # Flag to skip buying on the first run
 def get_boosted_tokens():
     """Fetch the latest boosted tokens from DEX Screener API"""
     try:
-        response = requests.get(BOOSTS_ENDPOINT, headers=HEADERS)
+        response = requests.get(BOOSTS_ENDPOINT, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             return response.json()
         else:
@@ -41,7 +41,7 @@ def get_token_pairs(chain_id, token_address):
     """Fetch pair data for a specific token address"""
     try:
         endpoint = f"{TOKENS_PAIRS_ENDPOINT}/{chain_id}/{token_address}"
-        response = requests.get(endpoint, headers=HEADERS)
+        response = requests.get(endpoint, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             return response.json()
         return None
@@ -54,13 +54,20 @@ def get_pair_data(chain_id, pair_address):
     """Fetch detailed pair data for a specific pair address"""
     try:
         endpoint = f"{PAIRS_ENDPOINT}/{chain_id}/{pair_address}"
-        response = requests.get(endpoint, headers=HEADERS)
+        response = requests.get(endpoint, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             return response.json()
         return None
     except Exception as e:
         print(f"Error fetching pair data: {str(e)}")
         return None
+
+
+def format_price(price):
+    """Format price to show up to 10 decimal places, removing trailing zeros and decimal if no significant digits"""
+    if price == "N/A" or not isinstance(price, (int, float)):
+        return "N/A"
+    return f"{price:.10f}".rstrip('0').rstrip('.')
 
 
 def process_token_data(token_data):
@@ -173,9 +180,7 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
     """Display token information, trading status, and active trades in tables"""
     table_data = []
     for token in tokens[:10]:  # Limit to first 10 coins
-        # Format price_usd to show up to 10 decimal places for very small values
-        price_usd_str = f"{float(token['price_usd']):.10f}".rstrip('0').rstrip('.') if token.get(
-            "price_usd") != "N/A" and isinstance(token["price_usd"], (int, float)) else "N/A"
+        price_usd_str = format_price(token["price_usd"])
         row = [
             f"{token['age_minutes']:.2f}m",
             token.get("token_name", "Unknown")[:20],
@@ -212,50 +217,54 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
 
     print(f"\nCurrent Capital: ${current_capital:,.2f}")
 
-    # Active Trades Table
+    # Active Trades Table (including age from buy time)
     if trades['buys']:
         active_trades_data = []
+        current_time = int(time.time())
         for trade in trades['buys']:
             capital_spent = trade['buy_price'] * trade['quantity']
             current_value = trade['current_price'] * trade['quantity']
             percent_change = ((trade['current_price'] - trade['buy_price']) / trade['buy_price']) * 100 if trade[
                                                                                                                'buy_price'] > 0 else 0.0
             current_pnl = current_value - capital_spent
-            # Format prices to show up to 10 decimal places for very small values
-            buy_price_str = f"{trade['buy_price']:.10f}".rstrip('0').rstrip('.')
-            current_price_str = f"{trade['current_price']:.10f}".rstrip('0').rstrip('.')
-            highest_price_str = f"{trade['highest_price']:.10f}".rstrip('0').rstrip('.')
+            # Calculate age (in minutes) since the buy time (assuming buy_time is stored as a timestamp in seconds)
+            buy_time = trade.get('buy_time', current_time)  # Default to current time if not set
+            age_minutes = (current_time - buy_time) / 60  # Convert to minutes
             active_trades_data.append([
                 trade['token_name'][:20],
                 trade['token_address'][:45],
-                buy_price_str,
-                current_price_str,
+                format_price(trade['buy_price']),
+                format_price(trade['current_price']),
                 f"{trade['quantity']:.2f}",
                 f"${capital_spent:,.2f}",
                 f"${current_value:,.2f}",
                 f"{percent_change:.2f}%",
                 f"${current_pnl:,.2f}",
-                highest_price_str
+                format_price(trade['highest_price']),
+                f"{age_minutes:.2f}m"  # Age from buy time
             ])
 
         active_trades_headers = ["Token Name", "Token Address", "Buy Price USD", "Current Price USD", "Quantity",
-                                 "Capital Spent", "Current Value", "% Change", "PnL", "Highest Price USD"]
+                                 "Capital Spent", "Current Value", "% Change", "PnL", "Highest Price USD",
+                                 "Hold Age (m)"]
         print("\n=== Active Trades ===")
         print(tabulate(active_trades_data, headers=active_trades_headers, tablefmt="pretty",
-                       maxcolwidths=[20, 45, 15, 15, 10, 15, 15, 10, 15, 15]))
+                       maxcolwidths=[20, 45, 15, 15, 10, 15, 15, 10, 15, 15, 10]))
 
-    # Completed Trades (unchanged format, but include highest price)
+    # Completed Trades
     print("\nCompleted Trades:")
     for trade in trades['sells']:
         print(
-            f"  - {trade['token_name']} (Sold at: ${trade['sell_price']:.10f}, Bought at: ${trade['buy_price']:.10f}, Profit/Loss: ${trade['profit_loss']:.2f}, CA: {trade['token_address']}, Highest Price: ${trade['highest_price']:.10f})")
+            f"  - {trade['token_name']} (Sold at: ${format_price(trade['sell_price'])}, Bought at: ${format_price(trade['buy_price'])}, Profit/Loss: ${trade['profit_loss']:.2f}, CA: {trade['token_address']}, Highest Price: ${format_price(trade['highest_price'])})")
 
 
 def calculate_profit_loss(trades):
-    """Calculate total profit/loss from completed trades"""
+    """Calculate total profit/loss from completed trades and unrealized PnL for active trades"""
     total_profit_loss = sum(trade["profit_loss"] for trade in trades["sells"])
     current_value = sum(trade["current_price"] * trade["quantity"] for trade in trades["buys"])
-    return total_profit_loss, current_value
+    capital_spent = sum(trade["buy_price"] * trade["quantity"] for trade in trades["buys"])
+    unrealized_pnl = current_value - capital_spent if trades["buys"] else 0.0
+    return total_profit_loss, current_value, unrealized_pnl
 
 
 def calculate_avg_percent_increase(trades):
@@ -279,10 +288,12 @@ def load_trading_data():
     try:
         with open("trading_data.json", "r") as f:
             data = json.load(f)
-            # Ensure 'highest_price' is initialized for existing buys and sells
+            # Ensure 'highest_price' and 'buy_time' are initialized for existing buys and sells
             for trade in data["buys"]:
                 if "highest_price" not in trade:
                     trade["highest_price"] = trade["buy_price"]
+                if "buy_time" not in trade:
+                    trade["buy_time"] = int(time.time())  # Default to current time if not set
             for trade in data["sells"]:
                 if "highest_price" not in trade:
                     trade["highest_price"] = trade["buy_price"]
@@ -291,7 +302,7 @@ def load_trading_data():
         return {
             "capital": INITIAL_CAPITAL,
             "buys": [],
-            # List of active trades: {"token_name", "token_address", "buy_price", "quantity", "current_price", "highest_price"}
+            # List of active trades: {"token_name", "token_address", "buy_price", "quantity", "current_price", "highest_price", "buy_time"}
             "sells": [],
             # List of completed trades: {"token_name", "token_address", "buy_price", "sell_price", "profit_loss", "highest_price"}
             "known_tokens": []  # Track tokens seen in previous iterations
@@ -344,12 +355,8 @@ def main():
                 if isinstance(price_usd, (int, float)) and price_usd > 0:
                     quantity = buy_amount / price_usd  # Calculate quantity based on price
                     if quantity > 0:  # Allow fractional amounts
-                        if quantity < 1:
-                            print(
-                                f"Buying fractional amount of {token['token_name']} at ${price_usd:.10f} with ${buy_amount:,.2f} ({quantity:.2f} units, CA: {token['token_address']})")
-                        else:
-                            print(
-                                f"Buying {token['token_name']} at ${price_usd:.10f} with ${buy_amount:,.2f} ({quantity:.2f} units, CA: {token['token_address']})")
+                        print(
+                            f"Buying {token['token_name']} at ${format_price(price_usd)} with ${buy_amount:,.2f} ({quantity:.2f} units, CA: {token['token_address']})")
                         current_capital -= buy_amount
                         trading_data["buys"].append({
                             "token_name": token["token_name"],
@@ -357,11 +364,12 @@ def main():
                             "buy_price": price_usd,
                             "quantity": quantity,
                             "current_price": price_usd,
-                            "highest_price": price_usd  # Initialize highest price at buy price
+                            "highest_price": price_usd,  # Initialize highest price at buy price
+                            "buy_time": int(time.time())  # Store buy time as timestamp in seconds
                         })
                     else:
                         print(
-                            f"Skipping {token['token_name']}: Insufficient capital for any units (${price_usd:.10f} each, CA: {token['token_address']})")
+                            f"Skipping {token['token_name']}: Insufficient capital for any units (${format_price(price_usd)} each, CA: {token['token_address']})")
                 else:
                     print(f"Skipping {token['token_name']}: Price USD is N/A or invalid (CA: {token['token_address']})")
 
@@ -374,12 +382,12 @@ def main():
                 trade["current_price"] = current_price
                 # Update highest price if current price is higher
                 trade["highest_price"] = max(trade["highest_price"], current_price)
-                # Check for profit target (200% appreciation)
+                # Check for profit target (90% appreciation)
                 if current_price >= trade["buy_price"] * SELL_THRESHOLD:
                     sell_value = current_price * trade["quantity"]
                     profit_loss = sell_value - (trade["buy_price"] * trade["quantity"])
                     print(
-                        f"Selling {trade['token_name']} at ${current_price:.10f} (Bought at ${trade['buy_price']:.10f}, Profit/Loss: ${profit_loss:.2f}, CA: {trade['token_address']})")
+                        f"Selling {trade['token_name']} at ${format_price(current_price)} (Bought at ${format_price(trade['buy_price'])}, Profit/Loss: ${profit_loss:.2f}, CA: {trade['token_address']})")
                     current_capital += sell_value
                     trading_data["sells"].append({
                         "token_name": trade["token_name"],
@@ -395,7 +403,7 @@ def main():
                     sell_value = current_price * trade["quantity"]
                     profit_loss = sell_value - (trade["buy_price"] * trade["quantity"])
                     print(
-                        f"Stop Loss: Selling {trade['token_name']} at ${current_price:.10f} (Bought at ${trade['buy_price']:.10f}, Profit/Loss: ${profit_loss:.2f}, CA: {trade['token_address']})")
+                        f"Stop Loss: Selling {trade['token_name']} at ${format_price(current_price)} (Bought at ${format_price(trade['buy_price'])}, Profit/Loss: ${profit_loss:.2f}, CA: {trade['token_address']})")
                     current_capital += sell_value
                     trading_data["sells"].append({
                         "token_name": trade["token_name"],
@@ -415,13 +423,14 @@ def main():
         # Display results
         display_tokens(sorted_tokens, current_capital, trading_data, iteration, runtime_minutes)
 
-        # Report average % increase to highest price every iteration
-        total_profit_loss, current_value = calculate_profit_loss(trading_data)
-        avg_percent_increase = calculate_avg_percent_increase(trading_data)
+        # Report average % increase to highest price and unrealized PnL every iteration
+        total_profit_loss, current_value, unrealized_pnl = calculate_profit_loss(trading_data)
+        avg_percent_increase = calculate_avg_percent_increase(trades=trading_data)
         print(f"\n=== Trading Summary - Iteration {iteration} ===")
         print(f"Total Capital: ${current_capital:,.2f}")
         print(f"Current Holdings Value: ${current_value:,.2f}")
-        print(f"Total Profit/Loss: ${total_profit_loss:,.2f}")
+        print(f"Total Realized Profit/Loss: ${total_profit_loss:,.2f}")
+        print(f"Unrealized Profit/Loss: ${unrealized_pnl:,.2f}")
         print(f"Number of Active Trades: {len(trading_data['buys'])}")
         print(f"Number of Completed Trades: {len(trading_data['sells'])}")
         print(f"Average % Increase to Highest Price: {avg_percent_increase:.2f}%")
@@ -433,13 +442,14 @@ def main():
         time.sleep(60)
 
     print("\n=== All capital lost. Simulation ended. ===")
-    total_profit_loss, current_value = calculate_profit_loss(trading_data)
-    avg_percent_increase = calculate_avg_percent_increase(trading_data)
+    total_profit_loss, current_value, unrealized_pnl = calculate_profit_loss(trading_data)
+    avg_percent_increase = calculate_avg_percent_increase(trades=trading_data)
     runtime_minutes = (time.time() - start_time) / 60
     print(f"Final Report - Iteration {iteration}, Runtime: {runtime_minutes:.2f} minutes:")
     print(f"Final Capital: ${current_capital:,.2f}")
     print(f"Current Holdings Value: ${current_value:,.2f}")
-    print(f"Total Profit/Loss: ${total_profit_loss:,.2f}")
+    print(f"Total Realized Profit/Loss: ${total_profit_loss:,.2f}")
+    print(f"Unrealized Profit/Loss: ${unrealized_pnl:,.2f}")
     print(f"Number of Active Trades: {len(trading_data['buys'])}")
     print(f"Number of Completed Trades: {len(trading_data['sells'])}")
     print(f"Average % Increase to Highest Price: {avg_percent_increase:.2f}%")
