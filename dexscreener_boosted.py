@@ -306,7 +306,8 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
         tracked_sold_data = []
         for tracked_trade in trades['tracked_sold']:
             token_address = tracked_trade['token_address']
-            token = next((t for t in processed_tokens if t["token_address"] == token_address), None)
+            token = next((t for t in tokens if t["token_address"] == token_address),
+                         None)  # Changed from processed_tokens to tokens
             current_price = token["price_usd"] if token and token["price_usd"] != "N/A" and isinstance(
                 token["price_usd"], (int, float)) else tracked_trade["highest_price"]
             # Update highest price if current price is higher
