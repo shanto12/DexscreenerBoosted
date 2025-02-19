@@ -17,7 +17,7 @@ HEADERS = {
 # Trading parameters
 INITIAL_CAPITAL = 10000  # $10,000 starting capital
 BUY_PERCENTAGE = 0.10  # Buy with 10% of available capital
-SELL_THRESHOLD = 1.2  # Sell when price reaches 90% appreciation (1.9x purchase price)
+SELL_THRESHOLD = 1.4  # Sell when price reaches 90% appreciation (1.9x purchase price)
 STOP_LOSS_THRESHOLD = 0.7  # Sell when price falls to 30% below purchase price (70% of purchase price)
 CHAIN_ID = "solana"  # Focus on Solana tokens
 FIRST_RUN = True  # Flag to skip buying on the first run
@@ -338,28 +338,63 @@ def calculate_profit_loss(trades):
     return total_profit_loss, current_value, unrealized_pnl
 
 
-def calculate_avg_percent_increase(trades):
-    """Calculate the average percentage increase to the highest price for all bought tokens, including post-sale highest prices for sold tokens"""
+def calculate_avg_percent_increase(trades, processed_tokens):
+    """Calculate the average percentage increase to the highest price for all bought tokens (active, sold, or tracked)
+    until their price drops by 80% from the buy price, then stop tracking them"""
     if not trades["buys"] and not trades["sells"] and not trades.get("tracked_sold", []):
-        return 0.0
+        return 0.0, []  # Return average and list of tokens to remove (if any)
+
     percent_increases = []
-    # Include active trades
-    for trade in trades["buys"]:
-        if trade["buy_price"] > 0:
-            percent_increase = ((trade["highest_price"] - trade["buy_price"]) / trade["buy_price"]) * 100
+    tokens_to_remove = []  # List of token addresses to remove from tracking
+
+    # Helper function to check and process a trade
+    def process_trade(trade, is_active=True):
+        if trade["buy_price"] <= 0:
+            return None, None
+
+        token_address = trade["token_address"]
+        token = next((t for t in processed_tokens if t["token_address"] == token_address), None)
+        current_price = token["price_usd"] if token and token["price_usd"] != "N/A" and isinstance(token["price_usd"],
+                                                                                                   (int, float)) else \
+        trade["highest_price"]
+
+        # Check if current price has dropped by 80% or more from buy price
+        if current_price <= trade["buy_price"] * 0.8:  # 80% drop threshold
+            return None, token_address  # Mark for removal, no percent increase
+
+        # Calculate percent increase to highest price
+        percent_increase = ((trade["highest_price"] - trade["buy_price"]) / trade["buy_price"]) * 100
+        return percent_increase, None
+
+    # Process active trades
+    for trade in trades["buys"][:]:  # Use copy to modify while iterating
+        percent_increase, to_remove = process_trade(trade, is_active=True)
+        if percent_increase is not None:
             percent_increases.append(percent_increase)
-    # Include completed trades (using their highest price recorded at sale)
-    for trade in trades["sells"]:
-        if trade["buy_price"] > 0:
-            percent_increase = ((trade["highest_price"] - trade["buy_price"]) / trade["buy_price"]) * 100
+        elif to_remove:
+            tokens_to_remove.append(to_remove)
+            trades["buys"].remove(trade)  # Remove from active trades if below 80%
+
+    # Process completed trades
+    for trade in trades["sells"][:]:  # Use copy to modify while iterating
+        percent_increase, to_remove = process_trade(trade, is_active=False)
+        if percent_increase is not None:
             percent_increases.append(percent_increase)
-    # Include tracked sold tokens (using their post-sale highest prices)
-    for tracked_trade in trades.get("tracked_sold", []):
-        if tracked_trade["buy_price"] > 0:
-            percent_increase = ((tracked_trade["highest_price"] - tracked_trade["buy_price"]) / tracked_trade[
-                "buy_price"]) * 100
+        elif to_remove:
+            tokens_to_remove.append(to_remove)
+
+    # Process tracked sold tokens
+    for tracked_trade in trades.get("tracked_sold", [])[:]:  # Use copy to modify while iterating
+        percent_increase, to_remove = process_trade(tracked_trade, is_active=False)
+        if percent_increase is not None:
             percent_increases.append(percent_increase)
-    return sum(percent_increases) / len(percent_increases) if percent_increases else 0.0
+        elif to_remove:
+            tokens_to_remove.append(to_remove)
+            trades["tracked_sold"].remove(tracked_trade)  # Remove from tracked_sold if below 80%
+
+    # Return average and list of tokens to remove
+    avg_increase = sum(percent_increases) / len(percent_increases) if percent_increases else 0.0
+    return avg_increase, tokens_to_remove
 
 
 def load_trading_data():
@@ -390,14 +425,10 @@ def load_trading_data():
         return {
             "capital": INITIAL_CAPITAL,
             "buys": [],
-            # List of active trades: {"token_name", "token_address", "buy_price", "quantity", "current_price", "highest_price", "buy_time"}
             "sells": [],
-            # List of completed trades: {"token_name", "token_address", "buy_price", "sell_price", "profit_loss", "highest_price", "buy_time", "sell_time", "quantity"}
             "tracked_sold": [],
-            # List of all sold tokens, tracked for highest price: {"token_name", "token_address", "buy_price", "sell_price", "highest_price"}
             "known_tokens": []  # Track tokens seen in previous iterations
         }
-
 
 def save_trading_data(trading_data):
     """Save trading data to JSON file"""
@@ -527,16 +558,34 @@ def main():
                     })
                     trading_data["buys"].remove(trade)
 
-        # Update prices and highest prices for tracked sold tokens
+        # Update prices and highest prices for tracked sold tokens, checking for 80% drop
         for tracked_trade in trading_data.get("tracked_sold", [])[:]:  # Copy list to modify while iterating
             token_address = tracked_trade["token_address"]
             token = next((t for t in processed_tokens if t["token_address"] == token_address), None)
             if token and token["price_usd"] != "N/A" and isinstance(token["price_usd"], (int, float)):
                 current_price = token["price_usd"]
                 tracked_trade["highest_price"] = max(tracked_trade["highest_price"], current_price)
+                # Check if current price has dropped by 80% or more from buy price
+                if current_price <= tracked_trade["buy_price"] * 0.8:  # 80% drop threshold
+                    print(
+                        f"Stopping tracking {tracked_trade['token_name']} (CA: {tracked_trade['token_address']}) - Price dropped 80% from buy price (${tracked_trade['buy_price']} to ${current_price})")
+                    trading_data["tracked_sold"].remove(tracked_trade)
 
-        # Update known tokens
-        known_tokens.update(token["token_address"] for token in processed_tokens)
+        # Calculate average % increase and get tokens to remove
+        avg_percent_increase, tokens_to_remove = calculate_avg_percent_increase(trading_data, processed_tokens)
+
+        # Remove tokens that have dropped 80% from buys and sells if they exist there (though they shouldn't after sell logic)
+        for token_address in tokens_to_remove:
+            if any(trade["token_address"] == token_address for trade in trading_data["buys"]):
+                trading_data["buys"] = [trade for trade in trading_data["buys"] if
+                                        trade["token_address"] != token_address]
+            if any(trade["token_address"] == token_address for trade in trading_data["sells"]):
+                trading_data["sells"] = [trade for trade in trading_data["sells"] if
+                                         trade["token_address"] != token_address]
+
+        # Update known tokens (exclude tokens no longer tracked)
+        known_tokens.update(
+            token["token_address"] for token in processed_tokens if token["token_address"] not in tokens_to_remove)
         trading_data["known_tokens"] = list(known_tokens)
         trading_data["capital"] = current_capital
 
@@ -545,7 +594,6 @@ def main():
 
         # Report average % increase to highest price and unrealized PnL every iteration
         total_profit_loss, current_value, unrealized_pnl = calculate_profit_loss(trading_data)
-        avg_percent_increase = calculate_avg_percent_increase(trades=trading_data)
         print(f"\n=== Trading Summary - Iteration {iteration} ===")
         print(f"Total Capital: ${current_capital:,.2f}")
         print(f"Current Holdings Value: ${current_value:,.2f}")
@@ -564,7 +612,7 @@ def main():
 
     print("\n=== All capital lost. Simulation ended. ===")
     total_profit_loss, current_value, unrealized_pnl = calculate_profit_loss(trading_data)
-    avg_percent_increase = calculate_avg_percent_increase(trades=trading_data)
+    avg_percent_increase, _ = calculate_avg_percent_increase(trading_data, processed_tokens)
     runtime_minutes = (time.time() - start_time) / 60
     print(f"Final Report - Iteration {iteration}, Runtime: {runtime_minutes:.2f} minutes:")
     print(f"Final Capital: ${current_capital:,.2f}")
