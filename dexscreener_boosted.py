@@ -17,7 +17,7 @@ HEADERS = {
 # Trading parameters
 INITIAL_CAPITAL = 10000  # $10,000 starting capital
 BUY_PERCENTAGE = 0.10  # Buy with 10% of available capital
-SELL_THRESHOLD = 1.9  # Sell when price reaches 90% appreciation (1.9x purchase price)
+SELL_THRESHOLD = 1.2  # Sell when price reaches 90% appreciation (1.9x purchase price)
 STOP_LOSS_THRESHOLD = 0.7  # Sell when price falls to 30% below purchase price (70% of purchase price)
 CHAIN_ID = "solana"  # Focus on Solana tokens
 FIRST_RUN = True  # Flag to skip buying on the first run
