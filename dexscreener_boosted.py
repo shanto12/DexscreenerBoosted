@@ -5,12 +5,12 @@ import time
 from tabulate import tabulate
 import logging
 
-# Setup logging
+# Setup logging to a .txt file
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("trading.log"),
+        logging.FileHandler("trading_log.txt"),
         logging.StreamHandler()
     ]
 )
@@ -303,7 +303,14 @@ def load_trading_data():
 
 
 def save_trading_data(trading_data):
-    """Save trading data to trading_data.json."""
+    """Save trading data to trading_data.json after validating required fields."""
+    for trade_list in ["buys", "sells", "tracked_sold"]:
+        required = REQUIRED_FIELDS[trade_list]
+        for trade in trading_data.get(trade_list, []):
+            if not all(key in trade for key in required):
+                missing = [key for key in required if key not in trade]
+                logger.error(f"Attempted to save incomplete trade in {trade_list}: missing {missing}")
+                raise ValueError(f"Incomplete trade in {trade_list}: missing {missing}")
     try:
         with open("trading_data.json", "w") as f:
             json.dump(trading_data, f, indent=4)
@@ -350,7 +357,7 @@ def main():
                     if quantity > 0:
                         current_capital -= capital_to_spend
                         buy_time = time.time()
-                        trading_data["buys"].append({
+                        new_trade = {
                             "token_address": token_address,
                             "pair_address": pair_address,
                             "token_name": token["token_name"],
@@ -361,7 +368,8 @@ def main():
                             "highest_price": price_usd,
                             "current_price": price_usd,
                             "price_change_5m": token["price_change_5m"]
-                        })
+                        }
+                        trading_data["buys"].append(new_trade)
                         known_tokens.add(token_address)
                         logger.info(
                             f"Bought {quantity:.2f} of {token['token_name']} at ${price_usd:.10f} for ${capital_to_spend:,.2f}")
@@ -396,7 +404,7 @@ def main():
                 sell_value = current_price * trade["quantity"]
                 profit_loss = sell_value - trade["capital_spent"]
                 current_capital += sell_value
-                trading_data["sells"].append({
+                sell_trade = {
                     "token_address": trade["token_address"],
                     "pair_address": trade["pair_address"],
                     "token_name": trade["token_name"],
@@ -409,15 +417,17 @@ def main():
                     "buy_time": trade["buy_time"],
                     "sell_time": time.time(),
                     "highest_price": trade["highest_price"]
-                })
-                trading_data["tracked_sold"].append({
+                }
+                trading_data["sells"].append(sell_trade)
+                tracked_sold_trade = {
                     "token_address": trade["token_address"],
                     "pair_address": trade["pair_address"],
                     "token_name": trade["token_name"],
                     "buy_price": buy_price,
                     "sell_price": current_price,
                     "highest_price": trade["highest_price"]
-                })
+                }
+                trading_data["tracked_sold"].append(tracked_sold_trade)
                 trading_data["buys"].remove(trade)
                 logger.info(
                     f"Sold {trade['token_name']} at ${current_price:.10f} for ${sell_value:,.2f} (Reason: {sell_reason})")
