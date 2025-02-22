@@ -584,5 +584,6 @@ def main():
     print(f"Number of Tracked Sold Tokens: {len(trading_data.get('tracked_sold', []))}")
     print(f"Average % Increase to Highest Price: {avg_percent_increase:.2f}%")
 
+
 if __name__ == "__main__":
     main()
