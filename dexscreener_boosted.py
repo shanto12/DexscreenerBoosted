@@ -169,7 +169,6 @@ def process_token_data(token_data):
         if key not in seen_tokens:
             seen_tokens[key] = token_info
         else:
-            # Update if boost_amount is higher or age is newer
             existing_token = seen_tokens[key]
             if token_info["boost_amount"] > existing_token["boost_amount"] or \
                (token_info["boost_amount"] == existing_token["boost_amount"] and token_info["age_minutes"] < existing_token["age_minutes"]):
@@ -218,7 +217,6 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
 
     print(f"\nCurrent Capital: ${current_capital:,.2f}")
 
-    # Active Trades Table
     if trades['buys']:
         active_trades_data = []
         current_time = int(time.time())
@@ -252,7 +250,6 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
         print(tabulate(active_trades_data, headers=active_trades_headers, tablefmt="pretty",
                        maxcolwidths=[20, 45, 15, 15, 10, 15, 15, 10, 15, 15, 10, 15]))
 
-    # Completed Trades Table
     if trades['sells']:
         completed_trades_data = []
         for trade in trades['sells']:
@@ -278,7 +275,6 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
         print(tabulate(completed_trades_data, headers=completed_trades_headers, tablefmt="pretty",
                        maxcolwidths=[20, 45, 15, 15, 15, 15, 15, 15, 15]))
 
-    # Tracked Sold Tokens
     if trades.get('tracked_sold', []):
         tracked_sold_data = []
         for tracked_trade in trades['tracked_sold']:
@@ -420,7 +416,7 @@ def main():
         else:
             new_tokens = [token for token in processed_tokens if
                           token["token_address"] not in known_tokens and token["price_usd"] != "N/A" and
-                          (token["liquidity_usd"] == 0 or token["liquidity_usd"] >= 10000)]  # Liquidity check
+                          (token["liquidity_usd"] == 0 or token["liquidity_usd"] >= 10000)]
             for token in new_tokens:
                 buy_amount = current_capital * BUY_PERCENTAGE
                 price_usd = token["price_usd"]
@@ -505,11 +501,11 @@ def main():
                     })
                     trading_data["buys"].remove(trade)
 
-                # Check if buy time is more than 5 minutes ago
-                elif (current_time - trade["buy_time"]) > 300:  # 5 minutes = 300 seconds
+                # Check if no buy activity in last 5 minutes (using price_change_5m as a proxy)
+                elif token["price_change_5m"] == 0:  # No price change suggests no recent buys
                     sell_value = current_price * trade["quantity"]
                     profit_loss = sell_value - (trade["buy_price"] * trade["quantity"])
-                    print(f"Selling {trade['token_name']} due to holding > 5 minutes at ${format_price(current_price)} (Bought at ${format_price(trade['buy_price'])}, Profit/Loss: ${profit_loss:.2f}, CA: {trade['token_address']})")
+                    print(f"Selling {trade['token_name']} due to no buy activity in last 5 minutes at ${format_price(current_price)} (Bought at ${format_price(trade['buy_price'])}, Profit/Loss: ${profit_loss:.2f}, CA: {trade['token_address']})")
                     current_capital += sell_value
                     trading_data["sells"].append({
                         "token_name": trade["token_name"],
@@ -579,11 +575,10 @@ def main():
     print(f"Current Holdings Value: ${current_value:,.2f}")
     print(f"Total Realized Profit/Loss: ${total_profit_loss:,.2f}")
     print(f"Unrealized Profit/Loss: ${unrealized_pnl:,.2f}")
-    print(f"Number of Active Trades: {len(trading_data['buys'])}")
-    print(f"Number of Completed Trades: {len(trading_data['sells'])}")
-    print(f"Number of Tracked Sold Tokens: {len(trading_data.get('tracked_sold', []))}")
-    print(f"Average % Increase to Highest Price: {avg_percent_increase:.2f}%")
-
+    print(f"Number of Active Trades: ${len(trading_data['buys'])}")
+    print(f"Number of Completed Trades: ${len(trading_data['sells'])}")
+    print(f"Number of Tracked Sold Tokens: ${len(trading_data.get('tracked_sold', []))}")
+    print(f"Average % Increase to Highest Price: ${avg_percent_increase:.2f}%")
 
 if __name__ == "__main__":
     main()
