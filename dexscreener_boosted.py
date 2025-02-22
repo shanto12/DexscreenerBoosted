@@ -3,6 +3,18 @@ import json
 from datetime import datetime
 import time
 from tabulate import tabulate
+import logging
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("trading.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Constants
 API_BASE_URL = "https://api.dexscreener.com"
@@ -17,6 +29,15 @@ STOP_LOSS_THRESHOLD = 0.7
 CHAIN_ID = "solana"
 FIRST_RUN = True
 
+# Required fields for each trade list
+REQUIRED_FIELDS = {
+    "buys": ["token_address", "pair_address", "token_name", "buy_price", "quantity", "capital_spent", "buy_time",
+             "highest_price"],
+    "sells": ["token_address", "pair_address", "token_name", "buy_price", "sell_price", "quantity", "capital_spent",
+              "sell_value", "profit_loss", "buy_time", "sell_time", "highest_price"],
+    "tracked_sold": ["token_address", "pair_address", "token_name", "buy_price", "sell_price", "highest_price"]
+}
+
 
 # API Functions
 def get_boosted_tokens():
@@ -25,12 +46,10 @@ def get_boosted_tokens():
         response = requests.get(f"{API_BASE_URL}/token-boosts/latest/v1", headers=HEADERS, timeout=10)
         response.raise_for_status()
         data = response.json()
-        # Ensure data is a list; if it's a single object, wrap it
-        if isinstance(data, dict):
-            return [data]
-        return data
+        logger.info(f"Fetched boosted tokens: {len(data) if isinstance(data, list) else 1} entries")
+        return data if isinstance(data, list) else [data]
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching boosted tokens: {e}")
+        logger.error(f"Error fetching boosted tokens: {e}")
         return None
 
 
@@ -42,7 +61,7 @@ def get_token_pairs(chain_id, token_address):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching token pairs for {token_address}: {e}")
+        logger.error(f"Error fetching token pairs for {token_address}: {e}")
         return None
 
 
@@ -55,7 +74,7 @@ def get_pair_data(chain_id, pair_address):
         data = response.json()
         return data["pairs"][0] if "pairs" in data and data["pairs"] else None
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching pair data for {pair_address}: {e}")
+        logger.error(f"Error fetching pair data for {pair_address}: {e}")
         return None
 
 
@@ -65,8 +84,7 @@ def format_price(price):
     if isinstance(price, (int, float)):
         formatted = f"{price:.10f}".rstrip('0').rstrip('.')
         return formatted if formatted else "0"
-    else:
-        return "N/A"
+    return "N/A"
 
 
 def process_token_data(token_data):
@@ -84,7 +102,7 @@ def process_token_data(token_data):
         if pairs:
             for pair in pairs:
                 pair_address = pair["pairAddress"]
-                pair_created_at = pair.get("pairCreatedAt", 0) / 1000  # Convert milliseconds to seconds
+                pair_created_at = pair.get("pairCreatedAt", 0) / 1000
                 age_minutes = (current_time - pair_created_at) / 60 if pair_created_at else 0
                 price_usd = float(pair.get("priceUsd", "0"))
                 liquidity_usd = float(pair.get("liquidity", {}).get("usd", "0"))
@@ -96,9 +114,6 @@ def process_token_data(token_data):
                 buys_24h = int(pair.get("txns", {}).get("h24", {}).get("buys", 0))
                 sells_24h = int(pair.get("txns", {}).get("h24", {}).get("sells", 0))
                 price_change_5m = float(pair.get("priceChange", {}).get("m5", "0"))
-                price_change_1h = float(pair.get("priceChange", {}).get("h1", "0"))
-                price_change_6h = float(pair.get("priceChange", {}).get("h6", "0"))
-                price_change_24h = float(pair.get("priceChange", {}).get("h24", "0"))
                 processed_tokens.append({
                     "age_minutes": age_minutes,
                     "token_address": token_address,
@@ -114,14 +129,12 @@ def process_token_data(token_data):
                     "txns_24h": txns_24h,
                     "buys_24h": buys_24h,
                     "sells_24h": sells_24h,
-                    "buy_vol_24h": "N/A",  # API does not provide separate buy/sell volumes
+                    "buy_vol_24h": "N/A",
                     "sell_vol_24h": "N/A",
                     "price_change_5m": price_change_5m,
-                    "price_change_1h": price_change_1h,
-                    "price_change_6h": price_change_6h,
-                    "price_change_24h": price_change_24h,
                 })
-    processed_tokens.sort(key=lambda x: x["age_minutes"])  # Sort by age (newest first, smallest age_minutes)
+    processed_tokens.sort(key=lambda x: x["age_minutes"])
+    logger.info(f"Processed {len(processed_tokens)} tokens")
     return processed_tokens
 
 
@@ -129,7 +142,6 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
     """Display token and trade information in tabulated format."""
     pair_data_map = {pair["pair_address"]: pair for pair in tokens}
 
-    # Boosted Tokens Table (Top 10)
     boosted_tokens_table = []
     for token in tokens[:10]:
         boosted_tokens_table.append([
@@ -148,22 +160,17 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
             token['buy_vol_24h'],
             token['sell_vol_24h'],
             f"{token['price_change_5m']:.2f}%",
-            f"{token['price_change_1h']:.2f}%",
-            f"{token['price_change_6h']:.2f}%",
-            f"{token['price_change_24h']:.2f}%",
             token['chain_id']
         ])
-    print("\nBoosted Tokens (Top 10):")
+    logger.info(f"\nIteration {iteration} Boosted Tokens (Top 10):")
     print(tabulate(boosted_tokens_table, headers=[
         "Age (m)", "Name", "Token Address", "Pair Address", "Boost", "Price USD",
         "Liquidity USD", "FDV", "Market Cap", "Txns (24h)", "Buys (24h)", "Sells (24h)",
-        "Buy Vol (24h)", "Sell Vol (24h)", "Price Chg 5m", "Price Chg 1h",
-        "Price Chg 6h", "Price Chg 24h", "Chain"
-    ], tablefmt="pretty", maxcolwidths=[10, 20, 45, 45, 10, 12, 15, 15, 15, 10, 10, 10, 15, 15, 10, 10, 10, 10, 10]))
+        "Buy Vol (24h)", "Sell Vol (24h)", "Price Chg 5m", "Chain"
+    ], tablefmt="pretty"))
 
-    print(f"\nCurrent Capital: ${current_capital:,.2f}")
+    logger.info(f"Current Capital: ${current_capital:,.2f}")
 
-    # Active Trades Table
     active_trades_table = []
     for trade in trades["buys"]:
         current_price = trade.get("current_price", 0)
@@ -192,45 +199,35 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
             f"{percent_diff_to_high:.2f}%",
             f"{last_buy_minutes:.1f}"
         ])
-    print("\nActive Trades:")
+    logger.info("\nActive Trades:")
     print(tabulate(active_trades_table, headers=[
         "Token Name", "Token Address", "Buy Price USD", "Current Price USD", "Quantity",
         "Capital Spent", "Current Value", "% Change", "PnL", "Highest Price USD",
         "Hold Age (m)", "% Diff to High", "Last Buy (m)"
-    ], tablefmt="pretty", maxcolwidths=[20, 45, 15, 15, 10, 15, 15, 10, 15, 15, 10, 15, 10]))
+    ], tablefmt="pretty"))
 
-    # Completed Trades Table
     completed_trades_table = []
     for trade in trades["sells"]:
-        buy_price = trade["buy_price"]
-        sell_price = trade["sell_price"]
-        capital_spent = trade["capital_spent"]
-        sell_value = trade["sell_value"]
-        pnl = trade["profit_loss"]
-        highest_price = trade["highest_price"]
-        hold_age_minutes = (trade["sell_time"] - trade["buy_time"]) / 60
         completed_trades_table.append([
             trade['token_name'],
             trade['token_address'],
-            format_price(buy_price),
-            format_price(sell_price),
-            f"{capital_spent:,.2f}",
-            f"{sell_value:,.2f}",
-            f"{pnl:,.2f}",
-            format_price(highest_price),
-            f"{hold_age_minutes:.1f}"
+            format_price(trade["buy_price"]),
+            format_price(trade["sell_price"]),
+            f"{trade['capital_spent']:,.2f}",
+            f"{trade['sell_value']:,.2f}",
+            f"{trade['profit_loss']:,.2f}",
+            format_price(trade["highest_price"]),
+            f"{(trade['sell_time'] - trade['buy_time']) / 60:.1f}"
         ])
-    print("\nCompleted Trades:")
+    logger.info("\nCompleted Trades:")
     print(tabulate(completed_trades_table, headers=[
         "Token Name", "Token Address", "Buy Price USD", "Sell Price USD", "Capital Spent",
         "Sell Value", "PnL", "Highest Price USD", "Hold Age (m)"
-    ], tablefmt="pretty", maxcolwidths=[20, 45, 15, 15, 15, 15, 15, 15, 15]))
+    ], tablefmt="pretty"))
 
-    # Tracked Sold Tokens Table
     tracked_sold_table = []
     for trade in trades["tracked_sold"]:
-        current_price = pair_data_map[trade["pair_address"]]["price_usd"] if trade[
-                                                                                 "pair_address"] in pair_data_map else "N/A"
+        current_price = pair_data_map.get(trade["pair_address"], {}).get("price_usd", "N/A")
         tracked_sold_table.append([
             trade['token_name'],
             trade['token_address'],
@@ -241,11 +238,11 @@ def display_tokens(tokens, current_capital, trades, iteration, runtime_minutes):
             f"{((trade['highest_price'] - trade['buy_price']) / trade['buy_price'] * 100):.2f}%" if trade[
                                                                                                         'buy_price'] > 0 else "N/A"
         ])
-    print("\nTracked Sold Tokens:")
+    logger.info("\nTracked Sold Tokens:")
     print(tabulate(tracked_sold_table, headers=[
         "Token Name", "Token Address", "Buy Price USD", "Sell Price USD", "Current Price USD",
         "Highest Price USD", "% Apprec to High"
-    ], tablefmt="pretty", maxcolwidths=[20, 45, 15, 15, 15, 15, 15]))
+    ], tablefmt="pretty"))
 
 
 def calculate_profit_loss(trades):
@@ -257,42 +254,45 @@ def calculate_profit_loss(trades):
     return realized_pnl, current_holdings_value, unrealized_pnl
 
 
-def calculate_avg_percent_increase(trades, processed_tokens):
-    """Calculate the average percentage increase to the highest price for all bought tokens."""
-    pair_data_map = {pair["pair_address"]: pair for pair in processed_tokens}
-    percent_increases = []
-    tokens_to_remove = []
-    for trade in trades["buys"] + trades["sells"] + trades["tracked_sold"]:
-        buy_price = trade["buy_price"]
-        if buy_price <= 0:
-            continue
-        current_price = pair_data_map.get(trade["pair_address"], {}).get("price_usd", trade.get("current_price",
-                                                                                                trade["highest_price"]))
-        if current_price <= buy_price * 0.8:
-            tokens_to_remove.append(trade["token_address"])
-            continue
-        highest_price = trade["highest_price"]
-        percent_increase = ((highest_price - buy_price) / buy_price) * 100
-        percent_increases.append(percent_increase)
-    avg_percent_increase = sum(percent_increases) / len(percent_increases) if percent_increases else 0
-    return avg_percent_increase, tokens_to_remove
-
-
 def load_trading_data():
-    """Load or initialize trading data from trading_data.json."""
+    """Load or initialize trading data from trading_data.json, ensuring all required fields are present."""
     try:
         with open("trading_data.json", "r") as f:
             data = json.load(f)
-            # Ensure all necessary fields are present
+            logger.info("Loaded trading_data.json")
             for trade_list in ["buys", "sells", "tracked_sold"]:
-                for trade in data.get(trade_list, []):
-                    trade["highest_price"] = trade.get("highest_price", trade.get("buy_price", 0))
-                    trade["buy_time"] = trade.get("buy_time", time.time())
-                    if trade_list == "sells":
-                        trade["sell_time"] = trade.get("sell_time", time.time())
-                        trade["quantity"] = trade.get("quantity", 1.0)
+                required = REQUIRED_FIELDS[trade_list]
+                original_trades = data.get(trade_list, [])
+                valid_trades = []
+                for trade in original_trades:
+                    if not isinstance(trade, dict):
+                        logger.warning(f"Invalid trade in {trade_list}: {trade} (not a dictionary)")
+                        continue
+                    if all(key in trade for key in required):
+                        valid_trades.append(trade)
+                    else:
+                        missing = [key for key in required if key not in trade]
+                        logger.warning(f"Removed trade from {trade_list} missing fields {missing}: {trade}")
+                data[trade_list] = valid_trades
+                removed_count = len(original_trades) - len(valid_trades)
+                if removed_count > 0:
+                    logger.info(f"Removed {removed_count} incomplete trades from {trade_list}")
+                logger.info(f"Loaded {len(valid_trades)} valid trades into {trade_list}")
+            for trade in data.get("buys", []):
+                trade["current_price"] = trade.get("current_price", trade["buy_price"])
+                trade["price_change_5m"] = trade.get("price_change_5m", 0)
             return data
     except FileNotFoundError:
+        logger.info("trading_data.json not found, initializing new data")
+        return {
+            "capital": INITIAL_CAPITAL,
+            "buys": [],
+            "sells": [],
+            "tracked_sold": [],
+            "known_tokens": []
+        }
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode trading_data.json: {e}")
         return {
             "capital": INITIAL_CAPITAL,
             "buys": [],
@@ -304,11 +304,14 @@ def load_trading_data():
 
 def save_trading_data(trading_data):
     """Save trading data to trading_data.json."""
-    with open("trading_data.json", "w") as f:
-        json.dump(trading_data, f, indent=4)
+    try:
+        with open("trading_data.json", "w") as f:
+            json.dump(trading_data, f, indent=4)
+        logger.info("Saved trading data to trading_data.json")
+    except Exception as e:
+        logger.error(f"Failed to save trading_data.json: {e}")
 
 
-# Main Logic
 def main():
     """Main function to run the trading simulation."""
     global FIRST_RUN
@@ -321,7 +324,7 @@ def main():
     while current_capital > 0:
         iteration += 1
         runtime_minutes = (time.time() - start_time) / 60
-        print(
+        logger.info(
             f"\nIteration {iteration} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (Runtime: {runtime_minutes:.1f} minutes)")
 
         token_data = get_boosted_tokens()
@@ -332,7 +335,6 @@ def main():
         pair_data_map = {pair["pair_address"]: pair for pair in processed_tokens}
 
         if not FIRST_RUN:
-            # Simulate buying new tokens
             for token in processed_tokens:
                 token_address = token["token_address"]
                 pair_address = token["pair_address"]
@@ -342,7 +344,7 @@ def main():
                         liquidity_usd == 0 or liquidity_usd >= 10000):
                     capital_to_spend = current_capital * BUY_PERCENTAGE
                     if capital_to_spend > current_capital:
-                        print(f"Insufficient capital to buy {token['token_name']}")
+                        logger.warning(f"Insufficient capital to buy {token['token_name']}")
                         continue
                     quantity = capital_to_spend / price_usd
                     if quantity > 0:
@@ -361,22 +363,22 @@ def main():
                             "price_change_5m": token["price_change_5m"]
                         })
                         known_tokens.add(token_address)
-                        print(
+                        logger.info(
                             f"Bought {quantity:.2f} of {token['token_name']} at ${price_usd:.10f} for ${capital_to_spend:,.2f}")
         FIRST_RUN = False
 
-        # Update and check sell conditions for active trades
         for trade in trading_data["buys"][:]:
+            if "pair_address" not in trade:
+                logger.warning(f"Skipping trade missing 'pair_address': {trade}")
+                trading_data["buys"].remove(trade)
+                continue
             pair_address = trade["pair_address"]
             if pair_address in pair_data_map:
-                current_price = pair_data_map[pair_address]["price_usd"]
-                price_change_5m = pair_data_map[pair_address]["price_change_5m"]
-                trade["current_price"] = current_price
-                trade["price_change_5m"] = price_change_5m
-                trade["highest_price"] = max(trade["highest_price"], current_price)
+                trade["current_price"] = pair_data_map[pair_address]["price_usd"]
+                trade["price_change_5m"] = pair_data_map[pair_address]["price_change_5m"]
+                trade["highest_price"] = max(trade["highest_price"], trade["current_price"])
             else:
-                # Keep last known values
-                pass
+                pass  # Keep last known values
 
             buy_price = trade["buy_price"]
             current_price = trade["current_price"]
@@ -417,10 +419,9 @@ def main():
                     "highest_price": trade["highest_price"]
                 })
                 trading_data["buys"].remove(trade)
-                print(
+                logger.info(
                     f"Sold {trade['token_name']} at ${current_price:.10f} for ${sell_value:,.2f} (Reason: {sell_reason})")
 
-        # Update tracked sold tokens
         for trade in trading_data["tracked_sold"][:]:
             pair_address = trade["pair_address"]
             if pair_address in pair_data_map:
@@ -428,43 +429,33 @@ def main():
                 trade["highest_price"] = max(trade["highest_price"], current_price)
                 if current_price <= trade["buy_price"] * 0.8:
                     trading_data["tracked_sold"].remove(trade)
-                    print(f"Stopped tracking {trade['token_name']} (Price dropped 80%)")
+                    logger.info(f"Stopped tracking {trade['token_name']} (Price dropped 80%)")
 
-        # Calculate average % increase and tokens to remove
-        avg_percent_increase, tokens_to_remove = calculate_avg_percent_increase(trading_data, processed_tokens)
-        for token_address in tokens_to_remove:
-            known_tokens.discard(token_address)
-
-        # Display tokens and trades
         display_tokens(processed_tokens, current_capital, trading_data, iteration, runtime_minutes)
 
-        # Report trading summary
         realized_pnl, current_holdings_value, unrealized_pnl = calculate_profit_loss(trading_data)
-        print(f"\nTrading Summary:")
-        print(f"  Current Capital: ${current_capital:,.2f}")
-        print(f"  Holdings Value: ${current_holdings_value:,.2f}")
-        print(f"  Realized P/L: ${realized_pnl:,.2f}")
-        print(f"  Unrealized P/L: ${unrealized_pnl:,.2f}")
-        print(f"  Active Trades: {len(trading_data['buys'])}")
-        print(f"  Completed Trades: {len(trading_data['sells'])}")
-        print(f"  Average % Increase to High: {avg_percent_increase:.2f}%")
+        logger.info(f"\nTrading Summary:")
+        logger.info(f"  Current Capital: ${current_capital:,.2f}")
+        logger.info(f"  Holdings Value: ${current_holdings_value:,.2f}")
+        logger.info(f"  Realized P/L: ${realized_pnl:,.2f}")
+        logger.info(f"  Unrealized P/L: ${unrealized_pnl:,.2f}")
+        logger.info(f"  Active Trades: {len(trading_data['buys'])}")
+        logger.info(f"  Completed Trades: {len(trading_data['sells'])}")
 
-        # Save trading data
         trading_data["capital"] = current_capital
         trading_data["known_tokens"] = list(known_tokens)
         save_trading_data(trading_data)
 
         time.sleep(60)
 
-    # Final report
-    print("\nCapital depleted. Stopping simulation.")
+    logger.info("\nCapital depleted. Stopping simulation.")
     realized_pnl, current_holdings_value, unrealized_pnl = calculate_profit_loss(trading_data)
-    print(f"Final Trading Summary:")
-    print(f"  Final Capital: ${current_capital:,.2f}")
-    print(f"  Holdings Value: ${current_holdings_value:,.2f}")
-    print(f"  Total Realized P/L: ${realized_pnl:,.2f}")
-    print(f"  Total Unrealized P/L: ${unrealized_pnl:,.2f}")
-    print(f"  Total Trades: {len(trading_data['sells'])}")
+    logger.info(f"Final Trading Summary:")
+    logger.info(f"  Final Capital: ${current_capital:,.2f}")
+    logger.info(f"  Holdings Value: ${current_holdings_value:,.2f}")
+    logger.info(f"  Total Realized P/L: ${realized_pnl:,.2f}")
+    logger.info(f"  Total Unrealized P/L: ${unrealized_pnl:,.2f}")
+    logger.info(f"  Total Trades: {len(trading_data['sells'])}")
 
 
 if __name__ == "__main__":
